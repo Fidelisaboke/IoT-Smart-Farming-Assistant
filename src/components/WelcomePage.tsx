@@ -1,9 +1,13 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { toast, Toaster } from 'sonner';
+import { auth, db } from '../firebase';
+import { createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged } from 'firebase/auth';
+import { setDoc, doc, getDoc } from 'firebase/firestore';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
-import { Leaf, Droplets, Sun, Users } from 'lucide-react';
+import { Leaf, Droplets, Sun, Users, Loader2 } from 'lucide-react';
 
 interface User {
   name: string;
@@ -19,17 +23,90 @@ export function WelcomePage({ onLogin }: WelcomePageProps) {
   const [formData, setFormData] = useState({
     name: '',
     email: '',
+    password: '',
     farmId: ''
   });
+  const [isSignup, setIsSignup] = useState(false);
+  const [loading, setLoading] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  // Persist user on login
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        // Fetch user profile from Firestore
+        const userDoc = await getDoc(doc(db, "users", user.uid));
+        if (userDoc.exists()) {
+          const userData = userDoc.data();
+          onLogin({
+            name: userData.name,
+            email: userData.email,
+            farmId: userData.farmId || undefined
+          });
+        }
+      }
+    });
+    return () => unsubscribe();
+  }, [onLogin]);
+
+  // Map Firebase error codes to user-friendly messages
+  function getFriendlyError(error: unknown) {
+    if (typeof error === 'object' && error && 'code' in error) {
+      // @ts-ignore
+      switch (error.code) {
+        case 'auth/email-already-in-use':
+          return 'Email is already in use.';
+        case 'auth/invalid-email':
+          return 'Please enter a valid email address.';
+        case 'auth/weak-password':
+          return 'Password should be at least 6 characters.';
+        case 'auth/user-not-found':
+        case 'auth/wrong-password':
+          return 'Invalid credentials.';
+        default:
+          // @ts-ignore
+          return error.message || 'An unexpected error occurred.';
+      }
+    }
+    return 'An unexpected error occurred.';
+  }
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (formData.name && formData.email) {
-      onLogin({
-        name: formData.name,
-        email: formData.email,
-        farmId: formData.farmId || undefined
-      });
+    if (loading) return;
+    setLoading(true);
+    if (formData.email && formData.password && (isSignup ? formData.name : true)) {
+      const password = formData.password;
+      if (isSignup) {
+        // Sign up
+        try {
+          const userCred = await createUserWithEmailAndPassword(auth, formData.email, password);
+          await setDoc(doc(db, "users", userCred.user.uid), {
+            name: formData.name,
+            email: formData.email,
+            farmId: formData.farmId
+          });
+          setLoading(false);
+          toast.success('Registration successful! You are now logged in.');
+          onLogin({ name: formData.name, email: formData.email, farmId: formData.farmId });
+        } catch (signupErr: any) {
+          setLoading(false);
+          toast.error(getFriendlyError(signupErr));
+        }
+      } else {
+        // Login
+        try {
+          const userCred = await signInWithEmailAndPassword(auth, formData.email, password);
+          const userDoc = await getDoc(doc(db, "users", userCred.user.uid));
+          const userData = userDoc.exists() ? userDoc.data() : { name: '', email: formData.email, farmId: formData.farmId };
+          onLogin(userData as User);
+        } catch (err: any) {
+          toast.error(getFriendlyError(err));
+        } finally {
+          setLoading(false);
+        }
+      }
+    } else {
+      setLoading(false);
     }
   };
 
@@ -81,18 +158,39 @@ export function WelcomePage({ onLogin }: WelcomePageProps) {
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <form onSubmit={handleSubmit} className="space-y-4">
-                <div>
-                  <Label htmlFor="name">Full Name</Label>
-                  <Input
-                    id="name"
-                    type="text"
-                    placeholder="Enter your full name"
-                    value={formData.name}
-                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                    required
-                  />
-                </div>
+              <Toaster position="top-center" richColors />
+              <div className="flex mb-4 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsSignup(false)}
+                  className={`flex-1 py-2 rounded ${!isSignup ? 'bg-green-600 text-white font-semibold' : 'bg-gray-100 text-green-700 border border-green-600'}`}
+                  disabled={loading}
+                >
+                  Login
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsSignup(true)}
+                  className={`flex-1 py-2 rounded ${isSignup ? 'bg-green-600 text-white font-semibold' : 'bg-gray-100 text-green-700 border border-green-600'}`}
+                  disabled={loading}
+                >
+                  Sign Up
+                </button>
+              </div>
+              <form onSubmit={handleSubmit} className="space-y-4" autoComplete="off">
+                {isSignup && (
+                  <div>
+                    <Label htmlFor="name">Full Name</Label>
+                    <Input
+                      id="name"
+                      type="text"
+                      placeholder="Enter your full name"
+                      value={formData.name}
+                      onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                      required={isSignup}
+                    />
+                  </div>
+                )}
                 <div>
                   <Label htmlFor="email">Email Address</Label>
                   <Input
@@ -101,6 +199,17 @@ export function WelcomePage({ onLogin }: WelcomePageProps) {
                     placeholder="Enter your email"
                     value={formData.email}
                     onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                    required
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="password">Password</Label>
+                  <Input
+                    id="password"
+                    type="password"
+                    placeholder="Enter your password"
+                    value={formData.password}
+                    onChange={(e) => setFormData({ ...formData, password: e.target.value })}
                     required
                   />
                 </div>
@@ -114,8 +223,19 @@ export function WelcomePage({ onLogin }: WelcomePageProps) {
                     onChange={(e) => setFormData({ ...formData, farmId: e.target.value })}
                   />
                 </div>
-                <Button type="submit" className="w-full bg-green-600 hover:bg-green-700">
-                  Access Dashboard
+                <Button
+                  type="submit"
+                  className={`w-full ${loading ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'}`}
+                  disabled={loading}
+                >
+                  {loading ? (
+                    <span className="flex items-center justify-center">
+                      <Loader2 className="animate-spin h-5 w-5 mr-2 text-white" />
+                      Processing...
+                    </span>
+                  ) : (
+                    isSignup ? 'Sign Up' : 'Access Dashboard'
+                  )}
                 </Button>
               </form>
             </CardContent>
